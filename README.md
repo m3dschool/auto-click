@@ -20,10 +20,13 @@ Useful flags
 - Image path:       --image approve.png
 - Confidence:       --confidence 0.85   (requires OpenCV; included)
 - Search interval:  --interval 0.2
-- After click wait: --after-click 0.3
+- Pre-click delay:  --pre-click-delay 0.5
+- After click wait: --after-click 0.5
 - Region:           --region "left,top,width,height"
 - Window filter:    --window-title "Your App Name"
 - Hotkeys:          --toggle-hotkey "ctrl+alt+a"  --quit-hotkey "ctrl+alt+q"
+- Auto-stop:        --no-detect-timeout 600   (seconds; 0 disables)
+- Restore pointer:  (default on) add --no-restore-pointer to disable, and --restore-duration 0.0 to animate return
 - Debug logs:       --debug
 
 Examples
