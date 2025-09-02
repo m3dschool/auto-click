@@ -1,5 +1,8 @@
 Auto-Approve (PyAutoGUI + OpenCV)
 
+VS CODE의 CODEX CLI "Approve" 버튼을 찾아서 자동으로 클릭하는 유틸리티입니다.
+10분간 버튼이 발견되지 않으면 자동 종료됩니다. 
+
 개요
 - 화면에서 템플릿 이미지(기본: approve.png)를 찾아 버튼을 자동 클릭합니다.
 - 전역 단축키로 시작/일시정지 전환(CTRL+ALT+A), 종료(CTRL+ALT+Q)가 가능합니다.
