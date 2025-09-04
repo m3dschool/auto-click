@@ -21,7 +21,8 @@ import argparse
 import sys
 import time
 import threading
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Iterable
+from pathlib import Path
 
 try:
     import pyautogui as pg
@@ -50,6 +51,9 @@ try:
     import pygetwindow as gw  # type: ignore
 except Exception:
     gw = None  # Optional dependency
+
+# Supported image extensions for template files
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 
 
 def parse_region(region_str: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
@@ -84,10 +88,59 @@ def active_window_matches(substr: Optional[str]) -> bool:
         return True
 
 
+def gather_image_templates(
+    single_image: Optional[str],
+    images_dir: Optional[str],
+    allow_dir_scan: bool,
+) -> List[str]:
+    """Collect a list of template image file paths to scan for.
+
+    - Includes all files with common image extensions under `images_dir` (non-recursive)
+      when `allow_dir_scan` is True and the directory exists.
+    - Also includes `single_image` if provided and not already in the list.
+    """
+    templates: List[str] = []
+
+    if allow_dir_scan and images_dir:
+        p = Path(images_dir)
+        if p.is_dir():
+            for entry in sorted(p.iterdir()):
+                if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
+                    templates.append(str(entry.resolve()))
+
+    if single_image:
+        sp = Path(single_image)
+        if sp.suffix.lower() in IMAGE_EXTS and sp.is_file():
+            try:
+                resolved = str(sp.resolve())
+            except Exception:
+                resolved = str(sp)
+            if resolved not in templates:
+                templates.append(resolved)
+
+    return templates
+
+
+def dedupe_points(points: Iterable[Tuple[int, int]], min_dist: int = 6) -> List[Tuple[int, int]]:
+    """Deduplicate points by skipping any that are within `min_dist` pixels of a prior point."""
+    kept: List[Tuple[int, int]] = []
+    for x, y in points:
+        too_close = False
+        for kx, ky in kept:
+            if abs(kx - x) <= min_dist and abs(ky - y) <= min_dist:
+                too_close = True
+                break
+        if not too_close:
+            kept.append((x, y))
+    return kept
+
+
 def main():
     parser = argparse.ArgumentParser(description="Auto-Approve clicker (PyAutoGUI + OpenCV)")
-    parser.add_argument("--image", "-i", default="approve.png", help="Path to the template image to find")
-    parser.add_argument("--confidence", "-c", type=float, default=0.85, help="Match confidence [0.0-1.0] (needs OpenCV)")
+    parser.add_argument("--image", "-i", default="approve.png", help="Path to a template image to find (also scans --images-dir)")
+    parser.add_argument("--images-dir", default="images", help="Directory of images to scan and click when matched")
+    parser.add_argument("--no-images-dir", action="store_true", help="Do not scan --images-dir; only use --image")
+    parser.add_argument("--confidence", "-c", type=float, default=0.80, help="Match confidence [0.0-1.0] (needs OpenCV)")
     parser.add_argument("--interval", type=float, default=0.2, help="Search interval in seconds")
     parser.add_argument("--pre-click-delay", type=float, default=0.0, help="Delay before clicking, in seconds")
     parser.add_argument("--after-click", type=float, default=0.5, help="Sleep after clicking, in seconds")
@@ -145,6 +198,28 @@ def main():
         if args.restore_duration:
             print(f"  (Restore animation: {args.restore_duration}s)")
 
+    # Build list of templates to scan
+    templates = gather_image_templates(
+        single_image=args.image,
+        images_dir=args.images_dir,
+        allow_dir_scan=(not args.no_images_dir),
+    )
+    if templates:
+        print(f"- Scanning {len(templates)} template(s)")
+        if args.images_dir and not args.no_images_dir and Path(args.images_dir).is_dir():
+            print(f"  (Includes images in '{args.images_dir}')")
+        if args.debug:
+            for t in templates:
+                print(f"  - {t}")
+    else:
+        print("Warning: No templates to scan. Check --image or --images-dir.")
+
+    # Inform if default/specified single image is missing (to avoid OpenCV WARN spam)
+    if args.image:
+        sp = Path(args.image)
+        if sp.suffix.lower() in IMAGE_EXTS and not sp.is_file():
+            print(f"Warning: template not found, skipping: {args.image}")
+
     last_error_ts = 0.0
     last_detection_ts = time.time()
 
@@ -161,30 +236,46 @@ def main():
                     time.sleep(args.interval)
                     continue
 
-                box = pg.locateOnScreen(
-                    args.image,
-                    confidence=args.confidence,
-                    region=region,
-                )
-                if box:
-                    x, y = pg.center(box)
+                # Accumulate all hit centers this iteration (dedup close points)
+                hit_points: List[Tuple[int, int]] = []
+                for tmpl in templates:
+                    try:
+                        matches = list(
+                            pg.locateAllOnScreen(
+                                tmpl,
+                                confidence=args.confidence,
+                                region=region,
+                            )
+                        )
+                    except TypeError:
+                        # If confidence not supported (OpenCV missing), fall back to single locate
+                        box = pg.locateOnScreen(tmpl, region=region)
+                        matches = [box] if box else []
+
+                    for m in matches:
+                        if not m:
+                            continue
+                        cx, cy = pg.center(m)
+                        hit_points.append((int(cx), int(cy)))
+
+                # Deduplicate near-overlapping points (e.g., similar templates)
+                hit_points = dedupe_points(hit_points, min_dist=6)
+
+                for (x, y) in hit_points:
                     orig_x, orig_y = pg.position()
                     if args.pre_click_delay > 0:
                         time.sleep(args.pre_click_delay)
                     if args.debug:
                         print(f"Found at ({x}, {y}), clicking {args.clicks}x with '{args.button}'")
                     pg.click(x=x, y=y, clicks=max(1, args.clicks), button=args.button)
-                    # Post-click wait
                     if args.after_click > 0:
                         time.sleep(args.after_click)
-                    # Restore pointer to original position
                     if not args.no_restore_pointer:
                         try:
                             pg.moveTo(orig_x, orig_y, duration=max(0.0, args.restore_duration))
                         except Exception as move_err:
                             if args.debug:
                                 print(f"Restore pointer failed: {move_err}")
-                    # Mark detection time
                     last_detection_ts = time.time()
             except KeyboardInterrupt:
                 quit_program()
