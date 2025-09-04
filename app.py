@@ -52,6 +52,14 @@ try:
 except Exception:
     gw = None  # Optional dependency
 
+# Optional OpenCV + NumPy for scoring and multi-template matching
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+except Exception:
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+
 # Supported image extensions for template files
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 
@@ -133,6 +141,91 @@ def dedupe_points(points: Iterable[Tuple[int, int]], min_dist: int = 6) -> List[
         if not too_close:
             kept.append((x, y))
     return kept
+
+
+def screenshot_bgr(region: Optional[Tuple[int, int, int, int]] = None):
+    """Capture the screen (or region) and return as a BGR numpy array for OpenCV."""
+    if cv2 is None or np is None:
+        return None
+    img = pg.screenshot(region=region)
+    arr = np.array(img)  # RGB
+    bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    return bgr
+
+
+def load_templates_cv(paths: List[str]):
+    """Load template images as BGR arrays with metadata for matching."""
+    if cv2 is None:
+        return None
+    templates = []
+    for p in paths:
+        try:
+            t = cv2.imread(p, cv2.IMREAD_COLOR)
+            if t is None:
+                continue
+            h, w = t.shape[:2]
+            templates.append({"path": p, "name": Path(p).name, "img": t, "w": w, "h": h})
+        except Exception:
+            continue
+    return templates
+
+
+def match_all_templates_cv(
+    screen_bgr,
+    templates,
+    confidence: float,
+    region_offset: Tuple[int, int] = (0, 0),
+):
+    """Match all templates on the provided screenshot.
+
+    Returns a list of dicts: {name, path, x, y, cx, cy, w, h, score}
+    Coordinates are absolute screen coordinates, accounting for region offset.
+    """
+    if cv2 is None or np is None or screen_bgr is None or not templates:
+        return []
+    results = []
+    for t in templates:
+        tmpl = t["img"]
+        w, h = t["w"], t["h"]
+        try:
+            res = cv2.matchTemplate(screen_bgr, tmpl, cv2.TM_CCOEFF_NORMED)
+        except Exception:
+            continue
+        loc = np.where(res >= confidence)
+        ys, xs = loc[0], loc[1]
+        candidates = [
+            (int(x), int(y), float(res[y, x]))
+            for x, y in zip(xs.tolist(), ys.tolist())
+        ]
+        candidates.sort(key=lambda k: k[2], reverse=True)
+        kept: List[Tuple[int, int, float]] = []
+        for x, y, s in candidates:
+            too_close = False
+            for kx, ky, _ in kept:
+                if abs(kx - x) <= max(6, w // 4) and abs(ky - y) <= max(6, h // 4):
+                    too_close = True
+                    break
+            if not too_close:
+                kept.append((x, y, s))
+
+        offx, offy = region_offset
+        for x, y, s in kept:
+            cx = x + w // 2 + offx
+            cy = y + h // 2 + offy
+            results.append(
+                {
+                    "name": t["name"],
+                    "path": t["path"],
+                    "x": x + offx,
+                    "y": y + offy,
+                    "cx": cx,
+                    "cy": cy,
+                    "w": w,
+                    "h": h,
+                    "score": s,
+                }
+            )
+    return results
 
 
 def main():
@@ -238,25 +331,51 @@ def main():
 
                 # Accumulate all hit centers this iteration (dedup close points)
                 hit_points: List[Tuple[int, int]] = []
-                for tmpl in templates:
+                printed_any = False
+                if cv2 is not None and np is not None and templates:
+                    # Preload templates once if available
                     try:
-                        matches = list(
-                            pg.locateAllOnScreen(
-                                tmpl,
-                                confidence=args.confidence,
-                                region=region,
-                            )
-                        )
-                    except TypeError:
-                        # If confidence not supported (OpenCV missing), fall back to single locate
-                        box = pg.locateOnScreen(tmpl, region=region)
-                        matches = [box] if box else []
-
+                        cv_templates
+                    except NameError:
+                        cv_templates = None  # type: ignore
+                    if not cv_templates:
+                        cv_templates = load_templates_cv(templates)
+                    # Capture screenshot once per loop
+                    offx, offy = 0, 0
+                    if region:
+                        offx, offy, _, _ = region
+                    scr = screenshot_bgr(region=region)
+                    matches = match_all_templates_cv(
+                        screen_bgr=scr,
+                        templates=cv_templates,
+                        confidence=args.confidence,
+                        region_offset=(offx, offy),
+                    )
                     for m in matches:
-                        if not m:
-                            continue
-                        cx, cy = pg.center(m)
-                        hit_points.append((int(cx), int(cy)))
+                        print(f"Match: {m['name']} @ ({m['cx']},{m['cy']}) score={m['score']:.3f}")
+                        printed_any = True
+                        hit_points.append((m["cx"], m["cy"]))
+                else:
+                    for tmpl in templates:
+                        try:
+                            found = list(
+                                pg.locateAllOnScreen(
+                                    tmpl,
+                                    confidence=args.confidence,
+                                    region=region,
+                                )
+                            )
+                        except TypeError:
+                            # If confidence not supported (OpenCV missing), fall back to single locate
+                            box = pg.locateOnScreen(tmpl, region=region)
+                            found = [box] if box else []
+                        for b in found:
+                            if not b:
+                                continue
+                            cx, cy = pg.center(b)
+                            print(f"Match: {Path(tmpl).name} @ ({int(cx)},{int(cy)})")
+                            printed_any = True
+                            hit_points.append((int(cx), int(cy)))
 
                 # Deduplicate near-overlapping points (e.g., similar templates)
                 hit_points = dedupe_points(hit_points, min_dist=6)
@@ -265,7 +384,7 @@ def main():
                     orig_x, orig_y = pg.position()
                     if args.pre_click_delay > 0:
                         time.sleep(args.pre_click_delay)
-                    if args.debug:
+                    if args.debug and not printed_any:
                         print(f"Found at ({x}, {y}), clicking {args.clicks}x with '{args.button}'")
                     pg.click(x=x, y=y, clicks=max(1, args.clicks), button=args.button)
                     if args.after_click > 0:
