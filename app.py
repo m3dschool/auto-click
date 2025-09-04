@@ -243,7 +243,7 @@ def main():
     parser.add_argument("--clicks", type=int, default=1, help="Number of clicks when found")
     parser.add_argument("--toggle-hotkey", default="ctrl+alt+a", help="Hotkey to toggle running on/off")
     parser.add_argument("--quit-hotkey", default="ctrl+alt+q", help="Hotkey to quit the script")
-    parser.add_argument("--no-detect-timeout", type=float, default=600.0, help="Auto-stop if no detection for N seconds (0 disables)")
+    parser.add_argument("--no-detect-timeout", type=float, default=360.0, help="Auto-stop if no detection for N seconds (0 disables)")
     parser.add_argument("--no-restore-pointer", action="store_true", help="Do not restore mouse to original position after clicking")
     parser.add_argument("--restore-duration", type=float, default=0.0, help="Seconds to animate pointer restore (0 = instant)")
     parser.add_argument("--debug", action="store_true", help="Verbose errors and state changes")
